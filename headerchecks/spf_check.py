@@ -37,7 +37,7 @@ def extrahiere_return_path(headers):
 
 
 
-def prüfe_spf(headers): 
+def pruefe_spf(headers): 
     ip = extrahiere_absender_ip(headers) #Der Server der die Mail geschickt hat
     absender = extrahiere_return_path(headers) #Die Adresse die beim SMTP angegeben wurde
 

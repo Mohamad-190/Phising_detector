@@ -7,7 +7,7 @@ from google_auth_oauthlib.flow import InstalledAppFlow
 from google.auth.transport.requests import Request
 from googleapiclient.discovery import build
 import time
-from headerchecks import prüfe_spf
+from headerchecks import pruefe_spf, pruefe_dkim
 print("Lade Modell...")
 modell = joblib.load("./models/phishing_model.pkl")
 print("Modell geladen")
@@ -55,7 +55,7 @@ def extrahiere_text(payload):
 
 
 
-def prüfe_mails(service, modell):
+def pruefe_mails(service, modell):
     results = service.users().messages().list(
         userId="me",
         labelIds=["INBOX"],
@@ -65,11 +65,22 @@ def prüfe_mails(service, modell):
     messages = results.get("messages", [])
 
     for msg in messages:
+        #Geparst
         mail_data = service.users().messages().get(
             userId="me",
             id=msg["id"],
             format="full"
         ).execute()
+
+        #Rohe Version für DKIM
+        raw_mail = service.users().messages().get(
+            userId="me",
+            id=msg["id"],
+            format="raw"
+        ).execute()
+
+        rohe_bytes = base64.urlsafe_b64decode(raw_mail["raw"])
+
 
         headers = mail_data["payload"]["headers"]
        
@@ -83,26 +94,37 @@ def prüfe_mails(service, modell):
         wahrscheinlichkeit = modell.predict_proba([gesamt_text])[0][1]
         wahrscheinlichkeit_angepasst = wahrscheinlichkeit
         
-        spf_result, spf_erklärung = prüfe_spf(headers)
+        spf_result, spf_explanation  = pruefe_spf(headers)
 
         # SPF-Ergebnis beeinflusst die Wahrscheinlichkeit
         if spf_result == "fail":
-            print(f"🚨 SPF FAIL – Absender nicht autorisiert: {spf_erklärung}")
+            print(f"🚨 SPF FAIL – Absender nicht autorisiert: {spf_explanation }")
             wahrscheinlichkeit_angepasst = min(wahrscheinlichkeit + 0.3, 1.0)
         elif spf_result == "softfail":
-            print(f"⚠️ SPF Softfail – verdächtig: {spf_erklärung}")
+            print(f"⚠️ SPF Softfail – verdächtig: {spf_explanation }")
             wahrscheinlichkeit_angepasst = min(wahrscheinlichkeit + 0.15, 1.0)
         elif spf_result == "pass":
             print(f"✅ SPF Pass")
             wahrscheinlichkeit_angepasst = wahrscheinlichkeit 
         else:
-            print(f"ℹ️ SPF: {spf_result} – {spf_erklärung}")
+            print(f"ℹ️ SPF: {spf_result} – {spf_explanation }")
             wahrscheinlichkeit_angepasst = min(wahrscheinlichkeit + 0.1, 1.0)
-     
+
+        #DKIM
+        dkim_result, dkim_explanation = pruefe_dkim(rohe_bytes)
+        if dkim_result == "pass":
+           print("✅ DKIM pass")
+        elif dkim_result == "fail":
+            print(f"🚨 DKIM fail")
+            wahrscheinlichkeit_angepasst = min(wahrscheinlichkeit_angepasst + 0.25, 1.0)
+        elif dkim_result == "error":
+            print(f" ℹ️DKIM error: {(dkim_explanation)}")
+            wahrscheinlichkeit_angepasst = min(wahrscheinlichkeit_angepasst + 0.1, 1.0)
+
         if wahrscheinlichkeit_angepasst >= 0.5:
-            print(f"🚨 Phishing ({wahrscheinlichkeit_angepasst:.0%}): {betreff}")
+            print(f"🚨 Phishing ({wahrscheinlichkeit_angepasst:.0%}): {betreff}\n --------------------")
         else:
-            print(f"✅ Legitim ({wahrscheinlichkeit_angepasst:.0%}): {betreff}")
+            print(f"✅ Legitim ({wahrscheinlichkeit_angepasst:.0%}): {betreff}\n --------------------")
 
 
 service = verbinde_gmail()
@@ -110,5 +132,5 @@ print("Mit Gmail erfolgreich verbunden")
 
 print("KI läuft prüfe alle 60 Sekunden...")
 while True:
-    prüfe_mails(service, modell)
+    pruefe_mails(service, modell)
     time.sleep(60)
