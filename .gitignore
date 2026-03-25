@@ -1,3 +1,7 @@
 token.json
 credentials.json
 phishing_model.pkl
+reddit.json
+combined_email.csv
+phishing_emails.csv
+vz.json
