@@ -1,6 +1,6 @@
 import pandas as pd
 from sklearn.feature_extraction.text import TfidfVectorizer
-from sklearn.ensemble import RandomForestClassifier
+from sklearn.linear_model import LogisticRegression
 from sklearn.pipeline import Pipeline
 from sklearn.model_selection import train_test_split
 from sklearn.metrics import classification_report, accuracy_score
@@ -66,15 +66,8 @@ print(f"→ {len(X_train)} Mails zum Trainieren")
 print(f"→ {len(X_test)} Mails zum Testen")
 
 pipeline = Pipeline([
-    ("tfidf", TfidfVectorizer(
-        max_features=10000,
-        ngram_range=(1, 2),
-        sublinear_tf=True
-    )),
-    ("modell", RandomForestClassifier(
-        n_estimators=100,
-        random_state=42
-    ))
+    ("tfidf", TfidfVectorizer(max_features=20000, ngram_range=(1, 2), sublinear_tf=True)),
+    ("modell", LogisticRegression(max_iter=1000, random_state=42))
 ])
 
 pipeline.fit(X_train, y_train)

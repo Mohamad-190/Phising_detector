@@ -7,53 +7,10 @@ from google_auth_oauthlib.flow import InstalledAppFlow
 from google.auth.transport.requests import Request
 from googleapiclient.discovery import build
 import time
-import requests
-import re
-import pandas as pd
-import tldextract
-
-
+from headerchecks import prüfe_spf
 print("Lade Modell...")
 modell = joblib.load("./models/phishing_model.pkl")
 print("Modell geladen")
-
-# Tranco Liste laden
-tranco = pd.read_csv("./data/top-1m.csv", names=["rank", "domain"])
-bekannte_domains = set(tranco["domain"].tolist())
-print("Tranco Liste geladen")
-
-# Freemailer die jeder benutzen kann → neutral behandeln
-FREEMAILER = {
-    "gmail.com", "outlook.com", "yahoo.com",
-    "hotmail.com", "web.de", "gmx.de", "gmx.at",
-    "icloud.com", "live.com"
-}
-
-def prüfe_domain(url):
-    ext = tldextract.extract(url)
-    domain = ext.top_domain_under_public_suffix
-    if domain in bekannte_domains:
-        return True
-    else:
-        return False
-
-def prüfe_absender(absender):
-    match = re.search(r'@([\w\.-]+)', absender)
-    if not match:
-        return "unbekannt"
-
-    domain = match.group(1).lower()
-    ext = tldextract.extract(domain)
-    registered_domain = ext.top_domain_under_public_suffix
-
-    if registered_domain in FREEMAILER:
-        return "freemailer"
-
-    if registered_domain in bekannte_domains:
-        return "vertrauenswürdig"
-
-    return "verdächtig"
-
 
 SCOPES = ["https://www.googleapis.com/auth/gmail.readonly"]
 
@@ -97,11 +54,12 @@ def extrahiere_text(payload):
     return text
 
 
+
 def prüfe_mails(service, modell):
     results = service.users().messages().list(
         userId="me",
         labelIds=["INBOX"],
-        maxResults=30
+        maxResults=2
     ).execute()
 
     messages = results.get("messages", [])
@@ -114,9 +72,9 @@ def prüfe_mails(service, modell):
         ).execute()
 
         headers = mail_data["payload"]["headers"]
+       
         betreff = next((h["value"] for h in headers if h["name"] == "Subject"), "")
         absender = next((h["value"] for h in headers if h["name"] == "From"), "")
-        reply_to = next((h["value"] for h in headers if h["name"] == "Reply-To"), "")
 
         text = extrahiere_text(mail_data["payload"])
         gesamt_text = betreff + " " + absender + " " + text
@@ -124,49 +82,27 @@ def prüfe_mails(service, modell):
         ergebnis = modell.predict([gesamt_text])[0]
         wahrscheinlichkeit = modell.predict_proba([gesamt_text])[0][1]
         wahrscheinlichkeit_angepasst = wahrscheinlichkeit
-
-        # Absender prüfen 
-        absender_status = prüfe_absender(absender)
-
-        if absender_status == "verdächtig":
-            wahrscheinlichkeit_angepasst += 0.20
         
-        # Reply-To prüfen 
-        if reply_to and reply_to != absender:
-            wahrscheinlichkeit_angepasst += 0.30
+        spf_result, spf_erklärung = prüfe_spf(headers)
 
-        # URLs prüfen 
-        gefundene_urls = re.findall(r'https?://[^\s]+', gesamt_text)
-        domain_score = 0
-
-        for url in gefundene_urls:
-            if not prüfe_domain(url):
-                domain_score += 1
-
-        if domain_score >= 1:
-            wahrscheinlichkeit_angepasst += 0.10
-        if domain_score >= 3:
-            wahrscheinlichkeit_angepasst += 0.20
-
-        # Maximum bei 100% halten
-        wahrscheinlichkeit_angepasst = min(wahrscheinlichkeit_angepasst, 1.0)
-
-
-        # Vertrauenswürdiger Absender = niemals Phishing
-        if absender_status == "vertrauenswürdig":
-            print(f" Legitim ({wahrscheinlichkeit_angepasst:.0%}): {betreff}")
-            print(f"   Absender Status: {absender_status}")
-
-        # Unbekannter oder verdächtiger Absender = KI entscheidet
-        elif ergebnis == 1 or wahrscheinlichkeit_angepasst >= 0.7:
-            print(f" PHISHING! ({wahrscheinlichkeit_angepasst:.0%} sicher)")
-            print(f"   Von: {absender}")
-            print(f"   Betreff: {betreff}")
-            print(f"   Absender Status: {absender_status}")
-
+        # SPF-Ergebnis beeinflusst die Wahrscheinlichkeit
+        if spf_result == "fail":
+            print(f"🚨 SPF FAIL – Absender nicht autorisiert: {spf_erklärung}")
+            wahrscheinlichkeit_angepasst = min(wahrscheinlichkeit + 0.3, 1.0)
+        elif spf_result == "softfail":
+            print(f"⚠️ SPF Softfail – verdächtig: {spf_erklärung}")
+            wahrscheinlichkeit_angepasst = min(wahrscheinlichkeit + 0.15, 1.0)
+        elif spf_result == "pass":
+            print(f"✅ SPF Pass")
+            wahrscheinlichkeit_angepasst = wahrscheinlichkeit 
+        else:
+            print(f"ℹ️ SPF: {spf_result} – {spf_erklärung}")
+            wahrscheinlichkeit_angepasst = min(wahrscheinlichkeit + 0.1, 1.0)
+     
+        if wahrscheinlichkeit_angepasst >= 0.5:
+            print(f"🚨 Phishing ({wahrscheinlichkeit_angepasst:.0%}): {betreff}")
         else:
             print(f"✅ Legitim ({wahrscheinlichkeit_angepasst:.0%}): {betreff}")
-            print(f"   Absender Status: {absender_status}")
 
 
 service = verbinde_gmail()
