@@ -1,7 +1,7 @@
 import dkim
 
 
-def pruefe_dkim(rohe_bytes):
+def check_dkim(rohe_bytes):
     try:
         ergebnis = dkim.verify(rohe_bytes)  
 

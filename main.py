@@ -7,14 +7,14 @@ from google_auth_oauthlib.flow import InstalledAppFlow
 from google.auth.transport.requests import Request
 from googleapiclient.discovery import build
 import time
-from headerchecks import pruefe_spf, pruefe_dkim
+from headerchecks import check_spf, check_dkim, check_dmarc
 print("Lade Modell...")
 modell = joblib.load("./models/phishing_model.pkl")
 print("Modell geladen")
 
 SCOPES = ["https://www.googleapis.com/auth/gmail.readonly"]
 
-def verbinde_gmail():
+def connect_gmail():
     creds = None
 
     if os.path.exists("token.json"):
@@ -34,7 +34,7 @@ def verbinde_gmail():
     return service
 
 
-def extrahiere_text(payload):
+def extract_text(payload):
     text = ""
 
     if "parts" in payload:
@@ -55,11 +55,39 @@ def extrahiere_text(payload):
 
 
 
-def pruefe_mails(service, modell):
+def check_heuristics(headers, text):
+    score = 0
+    text_lower = text.lower()
+    betreff = next((h["value"] for h in headers if h["name"] == "Subject"), "").lower()
+    absender = next((h["value"] for h in headers if h["name"] == "From"), "").lower()
+
+    # 1. Dringlichkeit
+    urgency_words = ["hurry", "sofort", "immediately", "urgent", "dringend", 
+                     "innerhalb", "within", "expire", "suspend"]
+    for word in urgency_words:
+        if word in text_lower:
+            score += 0.1
+            break
+
+    # 2. Passwort/Link-Aufforderung
+    action_words = ["change your password", "click the link", "verify your account",
+                    "confirm your identity", "update your information",
+                    "passwort ändern", "konto bestätigen", "link klicken"]
+    for phrase in action_words:
+        if phrase in text_lower:
+            score += 0.15
+            break
+
+
+    return min(score, 1.0)
+
+
+
+def check_mails(service, modell):
     results = service.users().messages().list(
         userId="me",
         labelIds=["INBOX"],
-        maxResults=2
+        maxResults=20
     ).execute()
 
     messages = results.get("messages", [])
@@ -87,14 +115,13 @@ def pruefe_mails(service, modell):
         betreff = next((h["value"] for h in headers if h["name"] == "Subject"), "")
         absender = next((h["value"] for h in headers if h["name"] == "From"), "")
 
-        text = extrahiere_text(mail_data["payload"])
+        text = extract_text(mail_data["payload"])
         gesamt_text = betreff + " " + absender + " " + text
 
-        ergebnis = modell.predict([gesamt_text])[0]
         wahrscheinlichkeit = modell.predict_proba([gesamt_text])[0][1]
         wahrscheinlichkeit_angepasst = wahrscheinlichkeit
         
-        spf_result, spf_explanation  = pruefe_spf(headers)
+        spf_result, spf_explanation  = check_spf(headers)
 
         # SPF-Ergebnis beeinflusst die Wahrscheinlichkeit
         if spf_result == "fail":
@@ -105,15 +132,16 @@ def pruefe_mails(service, modell):
             wahrscheinlichkeit_angepasst = min(wahrscheinlichkeit + 0.15, 1.0)
         elif spf_result == "pass":
             print(f"✅ SPF Pass")
-            wahrscheinlichkeit_angepasst = wahrscheinlichkeit 
+           
         else:
             print(f"ℹ️ SPF: {spf_result} – {spf_explanation }")
             wahrscheinlichkeit_angepasst = min(wahrscheinlichkeit + 0.1, 1.0)
 
         #DKIM
-        dkim_result, dkim_explanation = pruefe_dkim(rohe_bytes)
+        dkim_result, dkim_explanation = check_dkim(rohe_bytes)
         if dkim_result == "pass":
            print("✅ DKIM pass")
+          
         elif dkim_result == "fail":
             print(f"🚨 DKIM fail")
             wahrscheinlichkeit_angepasst = min(wahrscheinlichkeit_angepasst + 0.25, 1.0)
@@ -121,16 +149,32 @@ def pruefe_mails(service, modell):
             print(f" ℹ️DKIM error: {(dkim_explanation)}")
             wahrscheinlichkeit_angepasst = min(wahrscheinlichkeit_angepasst + 0.1, 1.0)
 
+        #DMARC
+        dmarc_result, dmarc_explanation = check_dmarc(headers, spf_result, dkim_result)    
+
+        if dmarc_result == "fail":
+            print(f"🚨 DMARC fail: {dmarc_explanation}")
+            wahrscheinlichkeit_angepasst = min(wahrscheinlichkeit_angepasst + 0.35, 1.0)
+        else:
+            print("✅ DMARC pass")
+           
+
+        # Wenn ALLE drei Header-Checks bestehen → leicht senken
+        if spf_result == "pass" and dkim_result == "pass" and dmarc_result == "pass":
+            wahrscheinlichkeit_angepasst = max(wahrscheinlichkeit_angepasst - 0.10, 0.0)   
+
+        heuristic_score = check_heuristics(headers, text)
+        wahrscheinlichkeit_angepasst = min(wahrscheinlichkeit_angepasst + heuristic_score, 1.0)
+
         if wahrscheinlichkeit_angepasst >= 0.5:
             print(f"🚨 Phishing ({wahrscheinlichkeit_angepasst:.0%}): {betreff}\n --------------------")
         else:
             print(f"✅ Legitim ({wahrscheinlichkeit_angepasst:.0%}): {betreff}\n --------------------")
 
 
-service = verbinde_gmail()
+service = connect_gmail()
 print("Mit Gmail erfolgreich verbunden")
 
-print("KI läuft prüfe alle 60 Sekunden...")
-while True:
-    pruefe_mails(service, modell)
-    time.sleep(60)
+print("KI läuft...")
+check_mails(service, modell)
+print("Fertig!")
